@@ -61,4 +61,4 @@ def extract_to_bronze(**kwargs):
 
 if __name__ == "__main__":
     # For local testing
-    extract_to_bronze(ti=type('obj', (object,), {'xcom_push': lambda **kw: None})())
+    extract_to_bronze(ti=type('obj', (object,), {'xcom_push': lambda self, **kw: None})())

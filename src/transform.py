@@ -2,6 +2,7 @@ import structlog
 import polars as pl
 import os
 from pathlib import Path
+from datetime import datetime
 
 logger = structlog.get_logger()
 
@@ -25,15 +26,15 @@ def clean_to_silver(**kwargs):
         # Gợi ý: pl.read_parquet(f"{BRONZE_DIR}/<table_name>.parquet")
         
         # YOUR CODE HERE
-        # customers_df = ...
-        # orders_df = ...
-        # order_items_df = ...
-        # products_df = ...
-        # sellers_df = ...
-        # geolocation_df = ...
-        # payments_df = ...
-        # reviews_df = ...
-        # translation_df = ...
+        customers_df = pl.read_parquet(f"{BRONZE_DIR}/customers_dataset.parquet")
+        orders_df = pl.read_parquet(f"{BRONZE_DIR}/orders_dataset.parquet")
+        order_items_df = pl.read_parquet(f"{BRONZE_DIR}/order_items_dataset.parquet")
+        products_df = pl.read_parquet(f"{BRONZE_DIR}/products_dataset.parquet")
+        sellers_df = pl.read_parquet(f"{BRONZE_DIR}/sellers_dataset.parquet")
+        geolocation_df = pl.read_parquet(f"{BRONZE_DIR}/geolocation_dataset.parquet")
+        payments_df = pl.read_parquet(f"{BRONZE_DIR}/order_payments_dataset.parquet")
+        reviews_df = pl.read_parquet(f"{BRONZE_DIR}/order_reviews_dataset.parquet")
+        translation_df = pl.read_parquet(f"{BRONZE_DIR}/product_category_name_translation.parquet")
 
         
         # 1. Clean Customers
@@ -45,7 +46,29 @@ def clean_to_silver(**kwargs):
         # TODO: Lưu kết quả thành dim_customers.parquet vào SILVER_DIR
         
         # YOUR CODE HERE
-        
+        geo_agg = (
+            geolocation_df
+            .group_by("geolocation_zip_code_prefix")
+            .agg(
+                pl.col("geolocation_lat").mean(),
+                pl.col("geolocation_lng").mean(),
+            )
+        )
+        dim_customers = (
+            customers_df
+            .unique(subset=["customer_id"], keep="first")
+            .with_columns(
+                pl.col("customer_city").str.to_lowercase().str.strip_chars(),
+                pl.col("customer_state").str.to_lowercase().str.strip_chars(),
+            )
+            .join(
+                geo_agg,
+                left_on="customer_zip_code_prefix",
+                right_on="geolocation_zip_code_prefix",
+                how="left"
+            )
+        )
+        dim_customers.write_parquet(f"{SILVER_DIR}/dim_customers.parquet")
         
         # 2. Clean Sellers
         log.info("Cleaning Sellers...")
@@ -54,7 +77,22 @@ def clean_to_silver(**kwargs):
         # TODO: Lưu kết quả thành dim_sellers.parquet vào SILVER_DIR
         
         # YOUR CODE HERE
-        
+        dim_sellers = (
+            sellers_df
+            .drop_nulls(subset=["seller_id"])
+            .unique(subset=["seller_id"], keep="first")
+            .with_columns(
+                pl.col("seller_city").str.to_lowercase().str.strip_chars(),
+                pl.col("seller_state").str.to_lowercase().str.strip_chars(),
+            )
+            .join(
+                geo_agg,
+                left_on="seller_zip_code_prefix",
+                right_on="geolocation_zip_code_prefix",
+            )
+        )
+
+        dim_sellers.write_parquet(f"{SILVER_DIR}/dim_sellers.parquet")
         
         # 3. Clean Products
         log.info("Cleaning Products...")
@@ -64,6 +102,18 @@ def clean_to_silver(**kwargs):
         # TODO: Lưu kết quả thành dim_products.parquet vào SILVER_DIR
         
         # YOUR CODE HERE
+        dim_products = (
+            products_df
+            .unique(subset=["product_id"], keep="first")
+            .fill_null(strategy="forward")
+            .rename({
+                "product_name_lenght": "product_name_length",
+                "product_description_lenght": "product_description_length",
+            })
+            .join(translation_df, on="product_category_name", how="left")
+        )
+
+        dim_products.write_parquet(f"{SILVER_DIR}/dim_products.parquet")
         
         
         # 4. Transform Fact Order Items
@@ -75,8 +125,35 @@ def clean_to_silver(**kwargs):
         # TODO: Đưa các record KHÔNG HỢP LỆ vào thư mục DLQ (Dead Letter Queue)
         
         # YOUR CODE HERE
-        
-        
+        valid_orders = orders_df.filter(
+            (pl.col("order_status") != "delivered")
+            | (
+                pl.col("order_purchase_timestamp").is_not_null()
+                & pl.col("order_delivered_customer_date").is_not_null()
+                & pl.col("order_delivered_carrier_date").is_not_null()
+            )
+        ).select(
+            "order_id", "customer_id", "order_status", "order_purchase_timestamp"
+        )
+
+        fct_items_df = order_items_df.join(
+            valid_orders,
+            on="order_id",
+            how="inner"
+        )
+        is_valid = (pl.col("price") > 0) & (pl.col("freight_value") >= 0)
+        fct_order_items = fct_items_df.filter(is_valid)
+        invalid_items = fct_items_df.filter(~is_valid)
+
+        fct_order_items.write_parquet(f"{SILVER_DIR}/fct_order_items.parquet")
+        if invalid_items.height > 0:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            invalid_items.write_parquet(f"{DLQ_DIR}/fct_order_items_invalid_{ts}.parquet")
+
+        error_rate = 0
+        if fct_items_df.height > 0:
+            error_rate = invalid_items.height / fct_items_df.height
+
         # 5. Transform Fact Order Payments
         log.info("Transforming Fact Order Payments...")
         # TODO: Join payments_df với orders_df (lấy order_id, customer_id)
@@ -84,7 +161,17 @@ def clean_to_silver(**kwargs):
         # TODO: Lưu fct_order_payments.parquet
         
         # YOUR CODE HERE
-        
+        fct_order_payments = (
+            payments_df
+            .join(
+                orders_df.select("order_id", "customer_id", "order_status"),
+                on="order_id",
+                how="inner"
+            )
+            .unique(subset=["order_id", "payment_sequential"], keep="first")
+        )
+
+        fct_order_payments.write_parquet(f"{SILVER_DIR}/fct_order_payments.parquet")
         
         # 6. Transform Fact Order Reviews
         log.info("Transforming Fact Order Reviews...")
@@ -93,11 +180,22 @@ def clean_to_silver(**kwargs):
         # TODO: Lưu fct_order_reviews.parquet
         
         # YOUR CODE HERE
+        fct_order_reviews = (
+            reviews_df
+            .join(
+                orders_df.select("order_id", "customer_id", "order_status"),
+                on="order_id",
+                how="inner"
+            )
+            .unique(subset=["review_id", "order_id"], keep="first")
+        )
+
+        fct_order_payments.write_parquet(f"{SILVER_DIR}/fct_order_reviews.parquet")
 
 
         # Lưu thông tin chất lượng dữ liệu để task check_quality kiểm tra
         # TODO: Cập nhật biến pass_quality. Ví dụ: pass_quality = True nếu số record bị lỗi < 10%
-        pass_quality = True 
+        pass_quality = error_rate < 0.1
         kwargs['ti'].xcom_push(key="pass_quality", value=pass_quality)
         
         log.info("transform_silver_success")
@@ -112,6 +210,7 @@ def check_quality(**kwargs):
     """
     passed = kwargs['ti'].xcom_pull(task_ids="transform_silver", key="pass_quality")
     log = logger.bind(task="check_quality")
+    passed = bool(passed)
     
     try:
         # TODO: Thực hiện Data Quality check dựa vào thư viện polars
@@ -122,12 +221,23 @@ def check_quality(**kwargs):
         # Nếu bất kỳ check nào fail, gán passed = False
         
         # YOUR CODE HERE
-        
+        dim_customers = pl.read_parquet(f"{SILVER_DIR}/dim_customers.parquet")
+        check_empty = dim_customers.height <= 0
+        check_null = dim_customers["customer_id"].is_null().sum() > 0
+        check_not_unique = dim_customers["customer_id"].n_unique() != dim_customers.height
+
         # TODO: Kiểm tra với bảng fct_order_items.parquet
         # Kiểm tra order_status chỉ thuộc tập giá trị hợp lệ 
         # (vd: ["delivered", "shipped", "invoiced", "processing", "approved", "canceled", "unavailable", "created"])
         
         # YOUR CODE HERE
+        fct_order_items = pl.read_parquet(f"{SILVER_DIR}/fct_order_items.parquet")
+        valid_statuses = ["delivered", "shipped", "invoiced", "processing", "approved", "canceled", "unavailable", "created"]
+        check_invalid_status = fct_order_items.filter(
+            ~pl.col("order_status") in valid_statuses
+        ).height != 0
+
+        if check_empty or check_null or check_not_unique or check_invalid_status: passed = False
 
         if passed:
             log.info("All Data Quality checks passed successfully!")
@@ -142,4 +252,4 @@ def check_quality(**kwargs):
 
 if __name__ == "__main__":
     # For local testing
-    clean_to_silver(ti=type('obj', (object,), {'xcom_push': lambda **kw: None})())
+    clean_to_silver(ti=type('obj', (object,), {'xcom_push': lambda self, **kw: None})())
