@@ -62,19 +62,19 @@ with DAG(
     
     
     # YOUR CODE HERE
-    # start = ...
-    # t_extract = ...
-    # t_transform = ...
-    # t_branch = ...
-    # t_load = ...
-    # t_report = ...
-    # t_alert = ...
-    # end = ...
+    start = EmptyOperator(task_id='start')
+    t_extract = PythonOperator(task_id='extract_to_bronze', python_callable=extract_to_bronze)
+    t_transform = PythonOperator(task_id='transform_to_silver', python_callable=clean_to_silver)
+    t_branch = BranchPythonOperator(task_id='check_quality', python_callable=check_quality)
+    t_load = PythonOperator(task_id='load_to_gold', python_callable=load_to_gold)
+    t_report = PythonOperator(task_id='execution_report', python_callable=lambda **kwargs: print(" PIPELINE SUCCESS "))
+    t_alert = EmptyOperator(task_id='alert_quality')
+    end = EmptyOperator(task_id='end', trigger_rule='none_failed')
     
     # TODO: Khai báo sự phụ thuộc (Dataflow) giữa các task
-    # Flow 1: start -> extract -> transform -> branch
-    # Flow 2 (branch success): branch -> load -> report -> end
-    # Flow 3 (branch failed): branch -> alert -> end
+    start >> t_extract >> t_transform >> t_branch
+    t_branch >> t_load >> t_report >> end
+    t_branch >> t_alert >> end
     
     # YOUR CODE HERE
     pass
