@@ -17,6 +17,13 @@
             </Attribute>
           </value>
         </entry>
+        <entry key="/data/raw/order_reviews_dataset.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
         <entry key="/data/raw/orders_dataset.csv">
           <value>
             <Attribute>

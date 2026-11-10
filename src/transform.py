@@ -67,6 +67,10 @@ def clean_to_silver(**kwargs):
                 right_on="geolocation_zip_code_prefix",
                 how="left"
             )
+            .rename({
+                "geolocation_lat": "customer_lat",
+                "geolocation_lng": "customer_lng",
+            })
         )
         dim_customers.write_parquet(f"{SILVER_DIR}/dim_customers.parquet")
         
@@ -89,7 +93,13 @@ def clean_to_silver(**kwargs):
                 geo_agg,
                 left_on="seller_zip_code_prefix",
                 right_on="geolocation_zip_code_prefix",
+                how="left"
             )
+            .rename({
+                "geolocation_lat": "seller_lat",
+                "geolocation_lng": "seller_lng",
+            })
+            .drop("seller_city")
         )
 
         dim_sellers.write_parquet(f"{SILVER_DIR}/dim_sellers.parquet")
@@ -111,6 +121,7 @@ def clean_to_silver(**kwargs):
                 "product_description_lenght": "product_description_length",
             })
             .join(translation_df, on="product_category_name", how="left")
+            .drop("product_category_name")
         )
 
         dim_products.write_parquet(f"{SILVER_DIR}/dim_products.parquet")
@@ -136,10 +147,17 @@ def clean_to_silver(**kwargs):
             "order_id", "customer_id", "order_status", "order_purchase_timestamp"
         )
 
-        fct_items_df = order_items_df.join(
-            valid_orders,
-            on="order_id",
-            how="inner"
+        fct_items_df = (
+            order_items_df
+            .join(
+                valid_orders,
+                on="order_id",
+                how="inner"
+            )
+            .with_columns(
+                pl.col("shipping_limit_date").str.to_datetime("%Y-%m-%d %H:%M:%S"),
+                pl.col("order_purchase_timestamp").str.to_datetime("%Y-%m-%d %H:%M:%S"),
+            )
         )
         is_valid = (pl.col("price") > 0) & (pl.col("freight_value") >= 0)
         fct_order_items = fct_items_df.filter(is_valid)
@@ -164,7 +182,7 @@ def clean_to_silver(**kwargs):
         fct_order_payments = (
             payments_df
             .join(
-                orders_df.select("order_id", "customer_id", "order_status"),
+                orders_df.select("order_id", "customer_id"),
                 on="order_id",
                 how="inner"
             )
@@ -183,14 +201,18 @@ def clean_to_silver(**kwargs):
         fct_order_reviews = (
             reviews_df
             .join(
-                orders_df.select("order_id", "customer_id", "order_status"),
+                orders_df.select("order_id", "customer_id"),
                 on="order_id",
                 how="inner"
             )
             .unique(subset=["review_id", "order_id"], keep="first")
+            .with_columns(
+                pl.col("review_creation_date").str.to_datetime("%Y-%m-%d %H:%M:%S"),
+                pl.col("review_answer_timestamp").str.to_datetime("%Y-%m-%d %H:%M:%S"),
+            )
         )
 
-        fct_order_payments.write_parquet(f"{SILVER_DIR}/fct_order_reviews.parquet")
+        fct_order_reviews.write_parquet(f"{SILVER_DIR}/fct_order_reviews.parquet")
 
 
         # Lưu thông tin chất lượng dữ liệu để task check_quality kiểm tra
